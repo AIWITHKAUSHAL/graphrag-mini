@@ -16,6 +16,7 @@ question -> LLM writes Cypher -> read-only guard -> Neo4j -> rows -> LLM writes 
 | `seed.py` | Builds the demo graph (run once) |
 | `graphrag.py` | The pipeline: question → Cypher → rows → answer |
 | `app.py` | CLI demo, prints every stage |
+| `example.py` | Standalone Student/Course Cypher tutorial (see "Learning Cypher" below) |
 | `.env.example` | Copy to `.env` and fill in |
 
 ## Setup
@@ -101,3 +102,204 @@ MATCH (n)-[r]->(m) RETURN n, r, m
 
 The guard checks that a generated query is *safe* and *runs* — nothing verifies that it answers
 the question actually asked. Worth stating out loud in the video.
+
+## Learning Cypher: Student/Course walkthrough
+
+A second, self-contained example lives in [`example.py`](example.py) — a Student/Course
+graph with the 10 practice queries below. It's independent of the Employee graph `seed.py`
+builds, so running it won't disturb the main demo.
+
+```bash
+python example.py            # builds the graph, then runs all 10 queries
+python example.py --build    # builds the graph only
+python example.py --query 5  # builds the graph, then runs just query 5
+python example.py --advanced # builds the graph, then runs the SET/MERGE/DELETE/...
+                              # examples below (steps 10-14 of the learning order)
+```
+
+### The recommended learning order
+
+If you're teaching or learning Cypher from scratch, go in this order — each step only
+needs the ones before it:
+
+1. **CREATE** — make nodes and relationships
+2. **MATCH** — find nodes and relationships that already exist
+3. **RETURN** — choose what a query outputs
+4. **WHERE** — filter matched data by a condition
+5. **relationships** — traverse `-[:TYPE]->` between nodes
+6. **SET** — update properties on existing nodes/relationships
+7. **MERGE** — create-if-missing, the idempotent version of CREATE
+8. **DELETE** — remove nodes/relationships (`DETACH DELETE` for nodes with edges)
+9. **aggregation** — `count()`, `collect()`, `avg()`, `sum()`, `GROUP BY`-style grouping
+10. **OPTIONAL MATCH** — like a SQL `LEFT JOIN`, keeps rows even when the match fails
+11. **WITH** — pipe results from one query part into the next
+12. **UNWIND** — expand a list into rows
+13. **CASE** — conditional expressions inside a query
+14. **variable-length paths** — `-[:TYPE*1..3]->` to traverse a chain of unknown depth
+
+The core shape to internalize:
+
+```
+MATCH   -> find nodes
+WHERE   -> filter them
+RETURN  -> show the result
+```
+
+versus SQL's `TABLE -> JOIN -> TABLE -> WHERE -> RESULT`: Cypher matches a **shape**
+(nodes and relationships) instead of joining tables.
+
+### Doing it manually in Neo4j Browser
+
+`example.py` runs everything for you, but to build the same intuition by hand:
+
+1. **Start Neo4j** and open Neo4j Browser at http://localhost:7474 (see Setup above).
+2. **Clear old data** (optional, only if you want a blank graph):
+   ```cypher
+   MATCH (n) DETACH DELETE n
+   ```
+3. **Create the students** — paste and run:
+   ```cypher
+   CREATE
+       (alice:Student {name: 'Alice', age: 22}),
+       (bob:Student {name: 'Bob', age: 23}),
+       (charlie:Student {name: 'Charlie', age: 21})
+   RETURN alice, bob, charlie;
+   ```
+4. **Create the courses** — paste and run:
+   ```cypher
+   CREATE
+       (python:Course {name: 'Python'}),
+       (neo4j:Course {name: 'Neo4j'}),
+       (docker:Course {name: 'Docker'})
+   RETURN python, neo4j, docker;
+   ```
+5. **Create the relationships** — match the six nodes you just made, then connect them:
+   ```cypher
+   MATCH (alice:Student {name: 'Alice'}),
+         (bob:Student {name: 'Bob'}),
+         (charlie:Student {name: 'Charlie'}),
+         (python:Course {name: 'Python'}),
+         (neo4j:Course {name: 'Neo4j'}),
+         (docker:Course {name: 'Docker'})
+   CREATE
+       (alice)-[:ENROLLED_IN]->(python),
+       (alice)-[:ENROLLED_IN]->(neo4j),
+       (bob)-[:ENROLLED_IN]->(python),
+       (bob)-[:ENROLLED_IN]->(docker),
+       (charlie)-[:ENROLLED_IN]->(neo4j)
+   RETURN *;
+   ```
+6. **See the whole graph** to sanity-check it visually:
+   ```cypher
+   MATCH (n)-[r]->(m) RETURN n, r, m;
+   ```
+7. **Run the 10 practice queries one at a time**, reading each result before moving to
+   the next — this is where the MATCH → WHERE → RETURN pattern actually sinks in:
+
+   | # | Question | Query |
+   |---|---|---|
+   | 1 | All students | `MATCH (s:Student) RETURN s;` |
+   | 2 | All courses | `MATCH (c:Course) RETURN c;` |
+   | 3 | Student names | `MATCH (s:Student) RETURN s.name;` |
+   | 4 | Students older than 21 | `MATCH (s:Student) WHERE s.age > 21 RETURN s.name, s.age;` |
+   | 5 | Alice's courses | `MATCH (s:Student {name: 'Alice'})-[:ENROLLED_IN]->(c:Course) RETURN c.name;` |
+   | 6 | Who is studying Python? | `MATCH (s:Student)-[:ENROLLED_IN]->(c:Course {name: 'Python'}) RETURN s.name;` |
+   | 7 | Who is studying Neo4j? | `MATCH (s:Student)-[:ENROLLED_IN]->(c:Course {name: 'Neo4j'}) RETURN s.name;` |
+   | 8 | Count students | `MATCH (s:Student) RETURN count(s);` |
+   | 9 | Count students per course | `MATCH (s:Student)-[:ENROLLED_IN]->(c:Course) RETURN c.name, count(s);` |
+   | 10 | Display complete graph | `MATCH (n)-[r]->(m) RETURN n, r, m;` |
+8. **Read relationship queries like English.** For example:
+   ```cypher
+   MATCH (a:Student)-[:ENROLLED_IN]->(b:Course)
+   RETURN a.name, b.name;
+   ```
+   reads as: *find a Student `a` who has an `ENROLLED_IN` relationship to a Course `b`,
+   and return the student's name and course name.*
+9. **Move on to the rest of the learning order** (SET, MERGE, DELETE, aggregation,
+   OPTIONAL MATCH, WITH, UNWIND, CASE, variable-length paths) once steps 1-8 feel natural —
+   each one builds directly on MATCH/WHERE/RETURN from this walkthrough. Examples for all
+   of them, on the same Student/Course graph, are below — and runnable via
+   `python example.py --advanced`.
+
+### SET, MERGE, DELETE, aggregation, OPTIONAL MATCH, WITH, UNWIND, CASE, variable-length paths
+
+Run these in order — later ones build on earlier ones (DELETE removes the student MERGE
+just created; the variable-length path query needs the FRIEND_OF edges created right
+before it).
+
+**SET** — update a property on a node that already exists:
+```cypher
+MATCH (s:Student {name: 'Alice'}) SET s.age = 23 RETURN s.name, s.age;
+```
+
+**MERGE** — create-if-missing, for both a node and a relationship. Unlike `CREATE`,
+running this twice does not create a duplicate Dave:
+```cypher
+MERGE (s:Student {name: 'Dave'}) ON CREATE SET s.age = 24
+WITH s MATCH (c:Course {name: 'Docker'})
+MERGE (s)-[:ENROLLED_IN]->(c)
+RETURN s.name, s.age;
+```
+
+**DELETE** — remove Dave; `DETACH DELETE` also removes his `ENROLLED_IN` edge, which
+plain `DELETE` would refuse to do while the edge still exists:
+```cypher
+MATCH (s:Student {name: 'Dave'}) DETACH DELETE s;
+```
+
+**aggregation** — `avg()`, `collect()`, and friends group rows the way SQL's
+`GROUP BY` does, keyed by whatever isn't itself being aggregated:
+```cypher
+MATCH (s:Student) RETURN avg(s.age) AS averageAge;
+
+MATCH (c:Course)<-[:ENROLLED_IN]-(s:Student)
+RETURN c.name AS course, collect(s.name) AS students;
+```
+
+**OPTIONAL MATCH** — like SQL's `LEFT JOIN`: keeps every student even when the second
+match finds nothing, filling the missing side with `null` instead of dropping the row:
+```cypher
+MATCH (s:Student)
+OPTIONAL MATCH (s)-[:ENROLLED_IN]->(c:Course {name: 'Docker'})
+RETURN s.name AS student, c.name AS docker;
+```
+
+**WITH** — pipes the result of one part of a query into the next, so you can filter on
+an aggregate (`WHERE` can't reference `count()` directly without it):
+```cypher
+MATCH (s:Student)-[:ENROLLED_IN]->(c:Course)
+WITH c, count(s) AS numStudents
+WHERE numStudents > 1
+RETURN c.name AS course, numStudents;
+```
+
+**UNWIND** — the reverse of `collect()`: expands a list into one row per item, useful
+for turning a plain list of values into something you can `MATCH` against:
+```cypher
+UNWIND ['Python', 'Neo4j', 'Docker'] AS courseName
+MATCH (c:Course {name: courseName})<-[:ENROLLED_IN]-(s:Student)
+RETURN courseName, count(s) AS numStudents;
+```
+
+**CASE** — an inline conditional expression, Cypher's equivalent of SQL's `CASE WHEN`:
+```cypher
+MATCH (s:Student)
+RETURN s.name AS student,
+       CASE WHEN s.age >= 23 THEN 'Senior' ELSE 'Junior' END AS level;
+```
+
+**variable-length paths** — `-[:TYPE*min..max]->` traverses a chain of relationships of
+unknown depth. First give the students something to chain through:
+```cypher
+MATCH (alice:Student {name: 'Alice'}),
+      (bob:Student {name: 'Bob'}),
+      (charlie:Student {name: 'Charlie'})
+MERGE (alice)-[:FRIEND_OF]->(bob)
+MERGE (bob)-[:FRIEND_OF]->(charlie);
+```
+Then walk 1 to 2 hops out from Alice — this returns both Bob (1 hop) and Charlie
+(2 hops, via Bob), which a fixed-length `-[:FRIEND_OF]->` could never reach in one query:
+```cypher
+MATCH (a:Student {name: 'Alice'})-[:FRIEND_OF*1..2]->(friend:Student)
+RETURN DISTINCT friend.name AS friend;
+```
