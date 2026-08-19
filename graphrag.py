@@ -67,6 +67,37 @@ Rows from the graph:
 {rows}
 """
 
+# Constrained mapping of supported question types to the graph relationship that
+# must appear in a query answering them. The read-only guard in db.py only checks
+# that a query is *safe*; this checks that it's actually *on topic* — e.g. a
+# well-formed, read-only query about departments should not sneak past as an
+# answer to a question about skills.
+INTENTS = [
+    ("skill", re.compile(r"\bskill|\bknows?\b|\bpython\b|\baws\b|\bneo4j\b|\bsql\b|\bdocker\b", re.I), "HAS_SKILL"),
+    ("project", re.compile(r"\bproject\b|\bworking on\b", re.I), "WORKS_ON"),
+    ("department", re.compile(r"\bdepartment\b|\bteam\b|\bbelong", re.I), "WORKS_IN"),
+]
+
+
+def detect_intent(question: str) -> str | None:
+    """Classify a question into one of the supported question types, if any."""
+    for name, pattern, _ in INTENTS:
+        if pattern.search(question):
+            return name
+    return None
+
+
+def matches_intent(question: str, cypher: str) -> bool:
+    """Semantic guard: does the query actually use the relationship implied by the
+    question's intent? A query can be perfectly read-only and still answer the
+    wrong question (e.g. WORKS_IN instead of HAS_SKILL) — this catches that."""
+    intent = detect_intent(question)
+    if intent is None:
+        return True  # question doesn't match a known type — nothing to check against
+    relationship = next(rel for name, _, rel in INTENTS if name == intent)
+    return relationship in cypher
+
+
 FALLBACK = [
     (
         r"\bpython\b|\baws\b|\bneo4j\b|\bsql\b|\bdocker\b",
@@ -153,6 +184,21 @@ def write_answer(question: str, rows: list) -> str:
 def ask(question: str) -> dict:
     """The whole pipeline, returned as one dict so the demo can print each stage."""
     cypher = generate_cypher(question)
-    rows = run_query(cypher)          # step 2 — the guard lives inside run_query
+
+    # Semantic guard: the safety guard in run_query only proves the query is
+    # read-only, not that it answers the question. If the LLM's query doesn't use
+    # the relationship the question implies, fall back to the deterministic,
+    # intent-matched query instead of running (and answering from) the wrong one.
+    intent_ok = matches_intent(question, cypher)
+    if not intent_ok:
+        cypher = _fallback_cypher(question)
+
+    rows = run_query(cypher)          # step 2 — the safety guard lives inside run_query
     answer = write_answer(question, rows)
-    return {"question": question, "cypher": cypher, "rows": rows, "answer": answer}
+    return {
+        "question": question,
+        "cypher": cypher,
+        "rows": rows,
+        "answer": answer,
+        "intent_validated": intent_ok,
+    }

@@ -17,6 +17,7 @@ question -> LLM writes Cypher -> read-only guard -> Neo4j -> rows -> LLM writes 
 | `graphrag.py` | The pipeline: question → Cypher → rows → answer |
 | `app.py` | CLI demo, prints every stage |
 | `example.py` | Standalone Student/Course Cypher tutorial (see "Learning Cypher" below) |
+| `tests/test_graphrag.py` | Tests for the four required questions (see "Tests" below) |
 | `.env.example` | Copy to `.env` and fill in |
 
 ## Setup
@@ -60,6 +61,23 @@ python app.py --chat     # ask your own
 Each question prints `QUESTION → CYPHER → ROWS → ANSWER`, which is exactly the sequence
 to narrate on camera.
 
+### Expected output for the four required questions
+
+Against the graph `seed.py` builds (5 employees, 3 departments, 3 projects, 5 skills),
+`python app.py` should produce:
+
+| # | Question | Rows | Answer (offline fallback wording) |
+|---|---|---|---|
+| 1 | Which employees know Python? | Priya Sharma (ML Engineer), Sneha Iyer (Data Scientist), Rahul Verma (Data Engineer) | From the graph: Priya Sharma, ML Engineer; Sneha Iyer, Data Scientist; Rahul Verma, Data Engineer |
+| 2 | Who is working on Project Alpha? | Priya Sharma (ML Engineer), Sneha Iyer (Data Scientist), Arjun Mehta (DevOps Engineer) | From the graph: Priya Sharma, ML Engineer; Sneha Iyer, Data Scientist; Arjun Mehta, DevOps Engineer |
+| 3 | Which employees belong to the AI department? | Priya Sharma (ML Engineer), Sneha Iyer (Data Scientist) | From the graph: Priya Sharma, ML Engineer; Sneha Iyer, Data Scientist |
+| 4 | Which projects have employees with AWS skills? | Project Beta (Kavya Nair), Project Gamma (Arjun Mehta), Project Alpha (Arjun Mehta) | From the graph: Project Beta, Kavya Nair; Project Gamma, Arjun Mehta; Project Alpha, Arjun Mehta |
+
+With a `GROQ_API_KEY` set, the rows are identical (same graph, same Cypher shape) but the
+`ANSWER` line is phrased by the LLM instead of the raw "From the graph: ..." fallback text.
+Row order isn't guaranteed by Cypher — Neo4j may return the "Rows" column in a different
+order across runs — so `tests/test_graphrag.py` compares row sets, not row order.
+
 ## The graph
 
 ```
@@ -80,8 +98,9 @@ MATCH (n)-[r]->(m) RETURN n, r, m
 2. `python app.py` — show all four questions answering.
 3. Open `graphrag.py`, point at `generate_cypher`, `run_query`, `write_answer` — the three
    stages, in order.
-4. Show `is_read_only` in `db.py` blocking a `DELETE`, then explain why generated Cypher
-   must never be trusted directly.
+4. Show `is_read_only` in `db.py` blocking a `DELETE`, then `matches_intent` in `graphrag.py`
+   catching a safe-but-wrong query — explain why generated Cypher must never be trusted
+   directly, on either axis.
 5. Close on the AWS question: vector search would have to find one document mentioning both
    AWS and a project name. The graph just walks `Skill ← HAS_SKILL ← Employee → WORKS_ON → Project`.
 
@@ -98,10 +117,47 @@ MATCH (n)-[r]->(m) RETURN n, r, m
 - **Reaching the LLM** — returned rows are pasted into a second prompt as the only allowed source
   for the final answer.
 
-## Known limitation
+## Guards: safety and intent
 
-The guard checks that a generated query is *safe* and *runs* — nothing verifies that it answers
-the question actually asked. Worth stating out loud in the video.
+`db.is_read_only` checks that a generated query is *safe* — read-only, starts with `MATCH`. That's
+necessary but not sufficient: a query can be perfectly safe and still answer the wrong question
+(e.g. a `WORKS_IN` query returned for a question about skills). `graphrag.matches_intent` is a
+second, semantic guard on top: it classifies the question into one of the four supported types
+(skill / project / department, via `graphrag.INTENTS`) and checks that the generated Cypher
+actually uses the relationship that type implies. If it doesn't, `ask()` in `graphrag.py` falls
+back to the deterministic, intent-matched query from `_fallback_cypher` instead of running (and
+answering from) the mismatched one. `ask()`'s result dict exposes this as `intent_validated`.
+
+This is a constrained mapping, not a general fix — questions outside the four supported types
+skip the check (`detect_intent` returns `None`) and run whatever Cypher was generated. Worth
+stating out loud in the video.
+
+## Tests
+
+```bash
+pip install -r requirements-dev.txt
+python -m pytest tests/
+```
+
+`tests/test_graphrag.py` covers the four required questions from `app.py`:
+
+- Cypher generated for each question uses the relationship the question implies
+  (`matches_intent` / `graphrag.INTENTS`).
+- The full `ask()` pipeline, with `db.run_query` mocked to return the rows you'd get from the
+  seeded graph, produces the right rows and a correctly phrased answer.
+- The semantic guard actually intervenes: given a deliberately off-topic (but read-only-safe)
+  query, `ask()` discards it and runs the intent-matched fallback instead.
+
+These run offline (`GROQ_API_KEY` is forced empty so Cypher comes from the deterministic keyword
+fallback) — no Neo4j or network access required.
+
+A further test class, `TestAgainstSeededDatabase`, runs the same four questions end to end
+against a real Neo4j instance and checks the actual returned rows. It's opt-in and skipped by
+default, since it rebuilds the graph via `seed.py` (wiping whatever `NEO4J_URI` points at):
+
+```bash
+RUN_INTEGRATION_TESTS=1 python -m pytest tests/ -k TestAgainstSeededDatabase
+```
 
 ## Learning Cypher: Student/Course walkthrough
 
